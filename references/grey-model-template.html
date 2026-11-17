@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>场景灰模 · 构图预览</title>
+<!-- 灰模交互模板 v1：只含交互层 + 最小占位场景，不含任何具体项目场景。 -->
+<!-- 用法：复制本文件，只替换 SCENE BUILD START / END 之间的几何，其余交互层不要改。 -->
+<!-- 启动：python -m http.server 8765 --directory <项目根>，浏览器打开对应地址。 -->
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:#0b0b0b; overflow:hidden; font-family: system-ui, "Microsoft YaHei", sans-serif; }
+  body { display:flex; align-items:center; justify-content:center; }
+  canvas { display:block; box-shadow:0 0 0 1px #2a2a2a; }
+  #hud { position:fixed; top:16px; left:16px; width:312px; max-height:calc(100vh - 32px); overflow-y:auto; padding:14px 16px; background:rgba(18,18,18,.92); border:1px solid #333; border-radius:10px; color:#ddd; font-size:12px; line-height:1.6; backdrop-filter: blur(6px); }
+  #hud h1 { font-size:14px; margin:0 0 4px; font-weight:600; color:#fff; }
+  #hud .sub { color:#8a8a8a; margin-bottom:10px; }
+  #hud .label { color:#9a9a9a; margin:8px 0 4px; font-size:11px; }
+  #hud .row { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; }
+  button { background:#242424; color:#ddd; border:1px solid #3a3a3a; border-radius:6px; padding:5px 9px; font-size:12px; cursor:pointer; }
+  button:hover { background:#303030; }
+  button.on { background:#e8e8e8; color:#111; border-color:#e8e8e8; }
+  #charList { display:flex; flex-direction:column; gap:5px; margin-bottom:8px; }
+  .char-row { display:flex; align-items:center; gap:6px; }
+  .char-row input[type="color"] { width:26px; height:26px; padding:0; border:1px solid #3a3a3a; border-radius:5px; background:#1a1a1a; cursor:pointer; }
+  .char-row input[type="text"] { flex:1; min-width:0; height:26px; padding:0 8px; background:#1a1a1a; border:1px solid #3a3a3a; border-radius:5px; color:#ddd; font-size:12px; }
+  .char-row button { padding:2px 8px; height:26px; line-height:1; }
+  #hint { position:fixed; bottom:14px; left:16px; color:#777; font-size:12px; line-height:1.7; }
+  #corner { position:fixed; pointer-events:none; border:1px solid rgba(255,255,255,.14); }
+  #corner::before, #corner::after { content:""; position:absolute; width:18px; height:18px; border-color:rgba(255,255,255,.5); border-style:solid; }
+  #corner::before { left:-1px; top:-1px; border-width:2px 0 0 2px; }
+  #corner::after { right:-1px; bottom:-1px; border-width:0 2px 2px 0; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="hud">
+  <h1>场景灰模</h1>
+  <div class="sub">场景尺寸：按项目填写</div>
+
+  <div class="label">参考机位</div>
+  <div class="row">
+    <button data-preset="main">主视角</button>
+    <button data-preset="top">高位俯视</button>
+    <button data-preset="side">斜侧全景</button>
+    <button data-preset="back">反向全景</button>
+  </div>
+
+  <div class="label">摄影机焦段 <span id="focalLabel">35mm</span></div>
+  <div class="row">
+    <button data-focal="24">24</button>
+    <button data-focal="35">35</button>
+    <button data-focal="50">50</button>
+    <button data-focal="85">85</button>
+    <button data-focal="135">135</button>
+    <button data-focal="200">200</button>
+  </div>
+
+  <div class="row">
+    <button id="modeBtn">摄影机模式</button>
+    <button id="gridBtn" class="on">网格</button>
+  </div>
+
+  <div class="label">角色（改名字 / 改颜色 / 拖动位置）</div>
+  <div id="charList"></div>
+  <div class="row">
+    <button id="addCharBtn">＋ 添加角色</button>
+    <button id="arrangeBtn">排列整齐</button>
+    <button id="peopleBtn" class="on">隐藏角色</button>
+  </div>
+
+  <div class="row">
+    <button id="exportBtn">导出 16:9</button>
+  </div>
+</div>
+
+<div id="hint">
+  左键旋转 · 滚轮缩放 · 右键平移<br>
+  摄影机模式：WASD 移动 · Q/E 升降 · 按住鼠标拖动转头 · Shift 加速<br>
+  角色：直接拖动人形，可在舞台和观众席之间移动
+</div>
+<div id="corner"></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ---------- renderer / scene / camera ---------- */
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x141414);
+
+const camera = new THREE.PerspectiveCamera(45, 16 / 9, 0.1, 300);
+camera.position.set(0, 5.5, 17);
+
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.target.set(0, 3, -5);
+orbit.enableDamping = true;
+orbit.dampingFactor = 0.08;
+orbit.minDistance = 3;
+orbit.maxDistance = 60;
+orbit.maxPolarAngle = Math.PI * 0.495;
+
+/* ---------- lights ---------- */
+scene.add(new THREE.HemisphereLight(0xffffff, 0x2a2a2a, 1.1));
+const key = new THREE.DirectionalLight(0xffffff, 2.0);
+key.position.set(9, 18, 12);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.left = -26;
+key.shadow.camera.right = 26;
+key.shadow.camera.top = 20;
+key.shadow.camera.bottom = -12;
+key.shadow.camera.near = 1;
+key.shadow.camera.far = 70;
+scene.add(key);
+const fill = new THREE.DirectionalLight(0xffffff, 0.55);
+fill.position.set(-12, 8, 8);
+scene.add(fill);
+
+/* ---------- materials / helpers ---------- */
+const M = (color, opts = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.86, metalness: 0.05, ...opts });
+const mats = {
+  stage: M(0x8f8f8f),
+  floor: M(0x666666),
+  dark: M(0x484848)
+};
+
+function box(w, h, d, x, y, z, mat, opts = {}) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  m.position.set(x, y, z);
+  if (opts.rx) m.rotation.x = opts.rx;
+  if (opts.ry) m.rotation.y = opts.ry;
+  if (opts.rz) m.rotation.z = opts.rz;
+  m.castShadow = opts.cast !== false;
+  m.receiveShadow = true;
+  scene.add(m);
+  return m;
+}
+function cyl(rt, rb, h, x, y, z, mat, opts = {}) {
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, 24), mat);
+  m.position.set(x, y, z);
+  if (opts.rx) m.rotation.x = opts.rx;
+  if (opts.rz) m.rotation.z = opts.rz;
+  m.castShadow = opts.cast !== false;
+  m.receiveShadow = true;
+  scene.add(m);
+  return m;
+}
+
+/* ===== SCENE BUILD START（替换这一整段；保留 stageMesh / floorMesh 变量名，拖拽靠它们落地） ===== */
+/* 本模板只含交互层 + 最小占位场景。
+   具体项目的场景几何（墙、屏、灯、道具、座位等）全部在这一段里重新搭，
+   不要把任何具体项目的场景写进本模板。 */
+const START_Y = 1.0;
+const floorMesh = box(60, 0.2, 60, 0, -0.1, 0, mats.floor, { cast: false });
+const stageMesh = box(12, 1.0, 8, 0, 0.5, -4, mats.stage);
+/* 占位台前沿线，只用来标出台面范围，可删 */
+box(12, 0.06, 0.12, 0, START_Y + 0.02, 0.0, mats.dark, { cast: false });
+/* ===== SCENE BUILD END ===== */
+
+/* ---------- grid ---------- */
+const grid = new THREE.GridHelper(60, 60, 0x6a6a6a, 0x2c2c2c);
+grid.position.y = 0.02;
+scene.add(grid);
+
+/* ---------- characters ---------- */
+const charLayer = new THREE.Group();
+scene.add(charLayer);
+const characters = [];
+const palette = ['#d9534f', '#3f7fd9', '#4caf7d', '#d9b34c', '#8a5cd9', '#d97a3f'];
+let charCounter = 0;
+
+function makeLabelCanvas(name, color) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, 256, 128);
+  const size = name.length >= 5 ? 36 : name.length >= 3 ? 50 : 66;
+  ctx.font = `bold ${size}px "Microsoft YaHei", sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = color;
+  ctx.fillText(name, 128, 66);
+  return canvas;
+}
+
+function updateCharacterLook(c) {
+  c.body.material.color.set(c.color);
+  c.head.material.color.set(c.color);
+  c.tex.image = makeLabelCanvas(c.name, c.color);
+  c.tex.needsUpdate = true;
+}
+
+function addCharacter(opts = {}) {
+  charCounter += 1;
+  const name = opts.name || `角色${charCounter}`;
+  const color = opts.color || palette[(charCounter - 1) % palette.length];
+  const n = characters.length;
+  const x = opts.x ?? Math.max(-8, Math.min(8, (n - 1) * 1.6));
+  const z = opts.z ?? -4;
+  const h = opts.h ?? 1.7;
+
+  const group = new THREE.Group();
+  group.position.set(x, START_Y, z);
+  const mat = M(new THREE.Color(color).getHex(), { roughness: 0.7 });
+
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.2, h - 0.4, 4, 12), mat);
+  body.position.y = (h - 0.4) / 2 + 0.2;
+  body.castShadow = true;
+  group.add(body);
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.13, 16, 12), mat);
+  head.position.y = h + 0.05;
+  head.castShadow = true;
+  group.add(head);
+
+  const tex = new THREE.CanvasTexture(makeLabelCanvas(name, color));
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  sprite.scale.set(1.15, 0.575, 1);
+  sprite.position.y = h + 0.52;
+  sprite.raycast = () => {};
+  group.add(sprite);
+
+  charLayer.add(group);
+  const character = { group, body, head, sprite, tex, name, color, height: h };
+  body.userData.char = character;
+  head.userData.char = character;
+  group.userData.character = character;
+  characters.push(character);
+  renderCharList();
+  return character;
+}
+
+function removeCharacter(index) {
+  const c = characters[index];
+  if (!c) return;
+  charLayer.remove(c.group);
+  c.body.geometry.dispose();
+  c.head.geometry.dispose();
+  c.body.material.dispose();
+  c.tex.dispose();
+  characters.splice(index, 1);
+  renderCharList();
+}
+
+function renderCharList() {
+  const list = document.getElementById('charList');
+  list.innerHTML = '';
+  characters.forEach((c, index) => {
+    const row = document.createElement('div');
+    row.className = 'char-row';
+
+    const colorInput = document.createElement('input');
+    colorInput.type = 'color';
+    colorInput.value = c.color;
+    colorInput.title = '改颜色';
+    colorInput.addEventListener('input', () => {
+      c.color = colorInput.value;
+      updateCharacterLook(c);
+    });
+
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.value = c.name;
+    nameInput.maxLength = 6;
+    nameInput.title = '改名字';
+    nameInput.addEventListener('input', () => {
+      c.name = nameInput.value.trim() || '角色';
+      updateCharacterLook(c);
+    });
+
+    const del = document.createElement('button');
+    del.textContent = '×';
+    del.title = '删除';
+    del.addEventListener('click', () => removeCharacter(index));
+
+    row.append(colorInput, nameInput, del);
+    list.appendChild(row);
+  });
+}
+
+document.getElementById('addCharBtn').addEventListener('click', () => addCharacter());
+document.getElementById('arrangeBtn').addEventListener('click', () => {
+  const n = characters.length;
+  const spacing = 1.7;
+  characters.forEach((c, i) => {
+    c.group.position.set((i - (n - 1) / 2) * spacing, START_Y, -4);
+  });
+});
+const peopleBtn = document.getElementById('peopleBtn');
+peopleBtn.addEventListener('click', () => {
+  charLayer.visible = !charLayer.visible;
+  peopleBtn.classList.toggle('on', charLayer.visible);
+  peopleBtn.textContent = charLayer.visible ? '隐藏角色' : '显示角色';
+});
+
+/* ---------- drag characters ---------- */
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let draggingChar = null;
+let draggingCamera = false;
+let lastX = 0, lastY = 0;
+
+function updatePointer(e) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+}
+
+function pickCharacter(e) {
+  updatePointer(e);
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(charLayer.children, true);
+  for (const hit of hits) {
+    let o = hit.object;
+    while (o && !o.userData.char) o = o.parent;
+    if (o && o.userData.char) return o.userData.char;
+  }
+  return null;
+}
+
+function surfacePoint(e) {
+  updatePointer(e);
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects([stageMesh, floorMesh], false);
+  for (const hit of hits) {
+    if (hit.face && hit.face.normal.y > 0.5) {
+      return hit.point;
+    }
+  }
+  return null;
+}
+
+const fallbackPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+function planePoint(e, y) {
+  updatePointer(e);
+  raycaster.setFromCamera(pointer, camera);
+  fallbackPlane.constant = -y;
+  const hit = new THREE.Vector3();
+  return raycaster.ray.intersectPlane(fallbackPlane, hit) ? hit : null;
+}
+
+function safeCapture(el, id) {
+  try { el.setPointerCapture(id); } catch (err) { /* synthetic or already captured */ }
+}
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  if (cameraMode) {
+    draggingCamera = true;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    safeCapture(renderer.domElement, e.pointerId);
+    return;
+  }
+  if (!charLayer.visible) return;
+  const c = pickCharacter(e);
+  if (c) {
+    draggingChar = c;
+    orbit.enabled = false;
+    safeCapture(renderer.domElement, e.pointerId);
+  }
+});
+
+addEventListener('pointermove', (e) => {
+  if (cameraMode && draggingCamera) {
+    yaw -= (e.clientX - lastX) * 0.0025;
+    pitch = THREE.MathUtils.clamp(pitch - (e.clientY - lastY) * 0.0025, -1.2, 1.2);
+    lastX = e.clientX;
+    lastY = e.clientY;
+    camera.rotation.set(pitch, yaw, 0);
+    return;
+  }
+  if (draggingChar) {
+    const surface = surfacePoint(e);
+    const p = surface || planePoint(e, draggingChar.group.position.y);
+    if (p) {
+      const x = THREE.MathUtils.clamp(p.x, -15, 15);
+      const z = THREE.MathUtils.clamp(p.z, -12, 14);
+      const y = surface ? surface.y : draggingChar.group.position.y;
+      draggingChar.group.position.set(x, y, z);
+    }
+  }
+});
+
+addEventListener('pointerup', () => {
+  draggingCamera = false;
+  if (draggingChar) {
+    draggingChar = null;
+    orbit.enabled = true;
+  }
+});
+
+/* ---------- focal length ---------- */
+const focalButtons = document.querySelectorAll('[data-focal]');
+const focalLabel = document.getElementById('focalLabel');
+const SENSOR_WIDTH = 36;
+
+function setFocal(mm) {
+  camera.fov = 2 * Math.atan(SENSOR_WIDTH / (2 * mm)) * 180 / Math.PI;
+  camera.updateProjectionMatrix();
+  focalLabel.textContent = mm + 'mm';
+  focalButtons.forEach((b) => b.classList.toggle('on', Number(b.dataset.focal) === mm));
+}
+focalButtons.forEach((btn) => {
+  btn.addEventListener('click', () => setFocal(Number(btn.dataset.focal)));
+});
+
+/* ---------- camera presets ---------- */
+const presets = {
+  main: { pos: [0, 5.5, 17], target: [0, 3, -5] },
+  top: { pos: [0, 15, 13], target: [0, 1.5, -4] },
+  side: { pos: [-13, 8, 11], target: [0, 2.5, -5] },
+  back: { pos: [0, 6, -9], target: [0, 2.5, 8] }
+};
+function applyPreset(name) {
+  if (cameraMode) exitCameraMode();
+  const p = presets[name];
+  camera.position.set(...p.pos);
+  orbit.target.set(...p.target);
+  orbit.update();
+}
+document.querySelectorAll('[data-preset]').forEach((btn) => {
+  btn.addEventListener('click', () => applyPreset(btn.dataset.preset));
+});
+
+/* ---------- first-person camera mode ---------- */
+let cameraMode = false;
+let yaw = 0, pitch = 0;
+const keys = new Set();
+
+function enterCameraMode() {
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  yaw = Math.atan2(-dir.x, -dir.z);
+  pitch = Math.asin(THREE.MathUtils.clamp(dir.y, -1, 1));
+  camera.rotation.order = 'YXZ';
+  camera.rotation.set(pitch, yaw, 0);
+  orbit.enabled = false;
+  cameraMode = true;
+  document.getElementById('modeBtn').classList.add('on');
+}
+function exitCameraMode() {
+  cameraMode = false;
+  orbit.enabled = true;
+  document.getElementById('modeBtn').classList.remove('on');
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  orbit.target.copy(camera.position).add(dir.multiplyScalar(8));
+  orbit.update();
+}
+document.getElementById('modeBtn').addEventListener('click', () => {
+  cameraMode ? exitCameraMode() : enterCameraMode();
+});
+addEventListener('keydown', (e) => {
+  const k = e.key.toLowerCase();
+  if (['w', 'a', 's', 'd', 'q', 'e', 'shift'].includes(k)) keys.add(k);
+});
+addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
+
+/* ---------- grid / export ---------- */
+const gridBtn = document.getElementById('gridBtn');
+gridBtn.addEventListener('click', () => {
+  grid.visible = !grid.visible;
+  gridBtn.classList.toggle('on', grid.visible);
+});
+document.getElementById('exportBtn').addEventListener('click', () => {
+  const gv = grid.visible;
+  grid.visible = false;
+  renderer.setPixelRatio(1);
+  renderer.setSize(1920, 1080, false);
+  camera.aspect = 16 / 9;
+  camera.updateProjectionMatrix();
+  renderer.render(scene, camera);
+  const url = renderer.domElement.toDataURL('image/png');
+  grid.visible = gv;
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  resize();
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = '舞台_构图_' + Date.now() + '.png';
+  a.click();
+});
+
+/* ---------- resize / loop ---------- */
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  let cw = w, ch = w * 9 / 16;
+  if (ch > h) { ch = h; cw = h * 16 / 9; }
+  renderer.setSize(cw, ch);
+  camera.aspect = 16 / 9;
+  camera.updateProjectionMatrix();
+  const rect = renderer.domElement.getBoundingClientRect();
+  const el = document.getElementById('corner');
+  el.style.left = rect.left + 'px';
+  el.style.top = rect.top + 'px';
+  el.style.width = rect.width + 'px';
+  el.style.height = rect.height + 'px';
+  orbit.update();
+}
+addEventListener('resize', resize);
+
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (cameraMode) {
+    const speed = (keys.has('shift') ? 12 : 5) * dt;
+    const f = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+    const r = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+    if (keys.has('w')) camera.position.addScaledVector(f, speed);
+    if (keys.has('s')) camera.position.addScaledVector(f, -speed);
+    if (keys.has('d')) camera.position.addScaledVector(r, speed);
+    if (keys.has('a')) camera.position.addScaledVector(r, -speed);
+    if (keys.has('e')) camera.position.y += speed;
+    if (keys.has('q')) camera.position.y -= speed;
+    camera.position.x = THREE.MathUtils.clamp(camera.position.x, -22, 22);
+    camera.position.y = THREE.MathUtils.clamp(camera.position.y, 0.6, 14);
+    camera.position.z = THREE.MathUtils.clamp(camera.position.z, -14, 22);
+  } else if (!draggingChar) {
+    orbit.update();
+  }
+  renderer.render(scene, camera);
+}
+
+resize();
+applyPreset('main');
+setFocal(35);
+addCharacter({ name: '角色1', color: '#d9534f', x: -1.5, z: -4 });
+addCharacter({ name: '角色2', color: '#3f7fd9', x: 1.5, z: -4 });
+window.__characters = characters;
+window.__camera = camera;
+window.__pickAt = (x, y) => {
+  const c = pickCharacter({ clientX: x, clientY: y });
+  return c ? c.name : null;
+};
+animate();
+</script>
+</body>
+</html>
